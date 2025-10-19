@@ -1,95 +1,116 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import axios from "axios";
 import "./App.css";
 
 function App() {
   const [leaderboard, setLeaderboard] = useState([]);
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const response = await axios.get(
-          "https://raw.githubusercontent.com/GSSoC24/Postman-Challenge/main/add-your-certificate.md"
-        );
-        const parsedData = parseMarkdownTable(response.data);
-        const referralData = await fetchReferralData();
-        const updatedLeaderboard = calculateLeaderboard(
-          parsedData,
-          referralData
-        );
-        setLeaderboard(updatedLeaderboard);
-      } catch (error) {
-        console.error("Error fetching data:", error);
-      }
-    };
-    fetchData();
-  }, []);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  const fetchReferralData = async () => {
-    const response = await axios.get("/referral_data.json"); // Adjust this path as necessary
-    return response.data;
-  };
-
-  const parseMarkdownTable = (markdown) => {
+  // Memoized parser to avoid recreation
+  const parseMarkdownTable = useCallback((markdown) => {
     const lines = markdown.split("\n");
     const headers = lines[0]
       .split("|")
-      .map((header) => header.trim())
-      .filter((header) => header);
+      .map((h) => h.trim())
+      .filter(Boolean);
+    
     const hasReferralCode = headers.includes("Referral Code");
     const data = [];
 
-    for (const line of lines.slice(2)) {
-      if (line.trim() === "" || line.trim().startsWith("|---")) {
-        continue;
-      }
+    // Skip header and separator rows
+    for (let i = 2; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line || line.startsWith("|---")) continue;
 
-      const row = line
-        .split("|")
-        .map((cell) => cell.trim())
-        .filter((cell) => cell);
+      const row = line.split("|").map((c) => c.trim()).filter(Boolean);
 
       if (row.length === headers.length) {
-        const rowDict = {};
-        headers.forEach((header, i) => {
-          rowDict[header] = row[i];
-        });
+        const rowDict = headers.reduce((acc, header, idx) => {
+          acc[header] = row[idx];
+          return acc;
+        }, {});
 
-        if (
-          hasReferralCode &&
-          (!rowDict["Referral Code"] || rowDict["Referral Code"].trim() === "")
-        ) {
-          continue;
-        }
+        // Skip entries without referral code if required
+        if (hasReferralCode && !rowDict["Referral Code"]?.trim()) continue;
 
         data.push(rowDict);
       }
     }
 
     return data;
-  };
+  }, []);
 
-  const calculateLeaderboard = (parsedData, referralData) => {
-    const referralCount = {};
+  // Memoized leaderboard calculation
+  const calculateLeaderboard = useCallback((parsedData, referralData) => {
+    const referralCount = new Map();
 
     parsedData.forEach((entry) => {
-      const referralCode = entry["Referral Code"];
-      if (!referralCount[referralCode]) {
+      const code = entry["Referral Code"];
+      if (!referralCount.has(code)) {
         const owner = Object.keys(referralData).find(
-          (name) => referralData[name] === referralCode
+          (name) => referralData[name] === code
         );
-        referralCount[referralCode] = {
+        referralCount.set(code, {
           Name: owner,
-          "Referral Code": referralCode,
+          "Referral Code": code,
           "Number of Certifications": 0,
-        };
+        });
       }
-      referralCount[referralCode]["Number of Certifications"] += 1;
+      referralCount.get(code)["Number of Certifications"]++;
     });
 
-    return Object.values(referralCount).sort(
+    return Array.from(referralCount.values()).sort(
       (a, b) => b["Number of Certifications"] - a["Number of Certifications"]
     );
-  };
+  }, []);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        // Fetch both requests in parallel
+        const [markdownRes, referralRes] = await Promise.all([
+          axios.get(
+            "https://raw.githubusercontent.com/GSSoC24/Postman-Challenge/main/add-your-certificate.md"
+          ),
+          axios.get("/referral_data.json"),
+        ]);
+
+        const parsedData = parseMarkdownTable(markdownRes.data);
+        const updatedLeaderboard = calculateLeaderboard(
+          parsedData,
+          referralRes.data
+        );
+        setLeaderboard(updatedLeaderboard);
+      } catch (err) {
+        console.error("Error fetching data:", err);
+        setError("Failed to load leaderboard data");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, [parseMarkdownTable, calculateLeaderboard]);
+
+  // Memoize rendered rows to prevent unnecessary re-renders
+  const leaderboardRows = useMemo(
+    () =>
+      leaderboard.map((item, index) => (
+        <tr key={`${item["Referral Code"]}-${index}`}>
+          <td>{index + 1}</td>
+          <td>{item["Name"]}</td>
+          <td>{item["Referral Code"]}</td>
+          <td>{item["Number of Certifications"]}</td>
+          <td>{item["Number of Certifications"] * 50}</td>
+        </tr>
+      )),
+    [leaderboard]
+  );
+
+  if (loading) return <div className="App">Loading leaderboard...</div>;
+  if (error) return <div className="App error">{error}</div>;
 
   return (
     <div className="App">
@@ -97,8 +118,8 @@ function App() {
       <h1>Campus Ambassador Leaderboard</h1>
       <div className="description">
         Get ready to climb the ranks and win big! As a
-        <span className="highlight">GirlScript Summer of Code</span> campus
-        ambassador, your influence is invaluable. We&rsquo;re excited to
+        <span className="highlight"> GirlScript Summer of Code </span>
+        campus ambassador, your influence is invaluable. We're excited to
         introduce the leaderboard, your gateway to exclusive rewards. For every
         successful referral who completes certification and contributes a merged
         PR to the designated Postman Challenge GitHub repo, you earn a whopping
@@ -115,17 +136,7 @@ function App() {
             <th>Score</th>
           </tr>
         </thead>
-        <tbody>
-          {leaderboard.map((item, index) => (
-            <tr key={index}>
-              <td>{index + 1}</td>
-              <td>{item["Name"]}</td>
-              <td>{item["Referral Code"]}</td>
-              <td>{item["Number of Certifications"]}</td>
-              <td>{item["Number of Certifications"] * 50}</td>
-            </tr>
-          ))}
-        </tbody>
+        <tbody>{leaderboardRows}</tbody>
       </table>
       <footer>
         <img src="/footer.png" alt="GirlScript Summer Of Code Logo" />
